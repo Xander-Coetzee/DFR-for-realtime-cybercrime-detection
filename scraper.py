@@ -4,6 +4,25 @@ import json
 from datetime import datetime
 import smtplib
 import os
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.stem import PorterStemmer
+from nltk.corpus import stopwords
+
+# --- Download NLTK data ---
+def download_nltk_data():
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords')
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        nltk.download('punkt_tab')
 
 # --- Configuration for Email Notifications ---
 # To enable email notifications, set the following environment variables:
@@ -50,19 +69,25 @@ def save_threat_to_file(threat_data):
 
 def scrape_website(url):
     try:
+        download_nltk_data()
         response = requests.get(url)
         response.raise_for_status()  # Raise an exception for bad status codes
 
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        suspicious_keywords = ['credit card', 'password', 'social security number', 'login credentials', 'bank account', 'phishing']
+        suspicious_keywords = ['credit', 'password', 'social', 'login', 'bank', 'phish']
+        stemmer = PorterStemmer()
+        stop_words = set(stopwords.words('english'))
 
         articles = soup.find_all('article')
         for article in articles:
-            article_text = article.get_text(strip=True).lower()
+            article_text = article.get_text().lower()
+            words = word_tokenize(article_text)
+            stemmed_words = [stemmer.stem(word) for word in words if word.isalpha() and word not in stop_words]
+
             found_keywords = []
             for keyword in suspicious_keywords:
-                if keyword in article_text:
+                if stemmer.stem(keyword) in stemmed_words:
                     found_keywords.append(keyword)
             
             if found_keywords:
@@ -77,6 +102,7 @@ def scrape_website(url):
                 send_email_notification(threat_data)
             else:
                 print("No threats found in article.")
+
 
                 print(f"Article Content: {article.get_text(strip=True)}")
 
