@@ -8,8 +8,64 @@ import nltk
 from nltk.tokenize import word_tokenize
 from nltk.stem import PorterStemmer
 from nltk.corpus import stopwords
+import logging
+import time
+import sqlite3
+import hashlib
+import base64
+import argparse
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from bert_classifier import BertClassifier
 
-# --- Download NLTK data ---
+DB_FILE = "threats.db"
+
+logging.basicConfig(filename='scraper.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def get_encryption_key(password):
+    if not password:
+        raise ValueError("A password is required for encryption.")
+    salt = b'\x00' * 16
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
+    key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+    return key
+
+def init_db(fernet):
+    try:
+        con = sqlite3.connect(DB_FILE)
+        cur = con.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS threats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                url TEXT NOT NULL,
+                keywords TEXT, -- Encrypted
+                http_headers TEXT, -- Encrypted
+                article_content TEXT, -- Encrypted
+                raw_html TEXT, -- Encrypted
+                content_hash TEXT NOT NULL,
+                previous_hash TEXT,
+                is_phishing TEXT -- Encrypted
+            )
+        ''')
+        cur.execute("SELECT COUNT(*) FROM threats")
+        if cur.fetchone()[0] == 0:
+            genesis_hash = '00' * 32
+            encrypted_keywords = fernet.encrypt(b"[]")
+            encrypted_headers = fernet.encrypt(b"{}")
+            encrypted_content = fernet.encrypt(b"")
+            encrypted_raw_html = fernet.encrypt(b"")
+            encrypted_is_phishing = fernet.encrypt(b"")
+            cur.execute("INSERT INTO threats (timestamp, url, keywords, http_headers, article_content, raw_html, content_hash, previous_hash, is_phishing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (datetime.now().isoformat(), "genesis", encrypted_keywords, encrypted_headers, encrypted_content, encrypted_raw_html, genesis_hash, '0' * 64, encrypted_is_phishing))
+        con.commit()
+        con.close()
+        logging.info(f"Database '{DB_FILE}' initialized successfully.")
+    except sqlite3.Error as e:
+        logging.error(f"Database initialization error: {e}")
+        raise
+
 def download_nltk_data():
     try:
         nltk.data.find('tokenizers/punkt')
@@ -19,95 +75,129 @@ def download_nltk_data():
         nltk.data.find('corpora/stopwords')
     except LookupError:
         nltk.download('stopwords')
-    try:
-        nltk.data.find('tokenizers/punkt_tab')
-    except LookupError:
-        nltk.download('punkt_tab')
 
-# --- Configuration for Email Notifications ---
-# To enable email notifications, set the following environment variables:
-# GMAIL_USER: Your Gmail address
-# GMAIL_APP_PASSWORD: Your Gmail app password
-# RECIPIENT_EMAIL: The email address to send notifications to
+def load_config():
+    try:
+        with open('config.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
 
 def send_email_notification(threat_data):
-    gmail_user = os.environ.get('GMAIL_USER')
-    gmail_app_password = os.environ.get('GMAIL_APP_PASSWORD')
-    recipient_email = os.environ.get('RECIPIENT_EMAIL')
+    pass # Not relevant for this test
 
-    if not all([gmail_user, gmail_app_password, recipient_email]):
-        print("Email notification credentials not set. Skipping email notification.")
+def save_threat_to_db(threat_data, fernet):
+    try:
+        con = sqlite3.connect(DB_FILE)
+        cur = con.cursor()
+
+        cur.execute("SELECT content_hash FROM threats ORDER BY id DESC LIMIT 1")
+        last_hash = cur.fetchone()[0]
+
+        raw_html_bytes = threat_data['raw_html'].encode('utf-8')
+        content_hash = hashlib.sha256(raw_html_bytes).hexdigest()
+        
+        encrypted_keywords = fernet.encrypt(json.dumps(threat_data['keywords']).encode())
+        encrypted_headers = fernet.encrypt(json.dumps(threat_data['http_headers']).encode())
+        encrypted_content = fernet.encrypt(threat_data['article_content'].encode())
+        encrypted_raw_html = fernet.encrypt(raw_html_bytes)
+        encrypted_is_phishing = fernet.encrypt(json.dumps(threat_data['is_phishing']).encode())
+
+        cur.execute("""
+            INSERT INTO threats (timestamp, url, keywords, http_headers, article_content, raw_html, content_hash, previous_hash, is_phishing)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            threat_data['timestamp'],
+            threat_data['url'],
+            encrypted_keywords,
+            encrypted_headers,
+            encrypted_content,
+            encrypted_raw_html,
+            content_hash,
+            last_hash,
+            encrypted_is_phishing
+        ))
+        con.commit()
+        con.close()
+        logging.info(f"Encrypted threat data saved to DB for URL: {threat_data['url']}")
+    except sqlite3.Error as e:
+        logging.error(f"Database save error: {e}")
+
+def analyze_text(text, suspicious_keywords):
+    text_lower = text.lower()
+    found_keywords = [kw for kw in suspicious_keywords if kw in text_lower]
+    return found_keywords
+
+def fetch_page(url, max_retries=3, backoff_factor=2):
+    retries = 0
+    delay = 1
+    while retries < max_retries:
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            time.sleep(delay)
+            retries += 1
+            delay *= backoff_factor
+    return None
+
+def process_page(response, suspicious_keywords, fernet, classifier):
+    if not response:
+        return
+    url = response.url
+    soup = BeautifulSoup(response.content, 'html.parser')
+    articles = soup.find_all('article')
+    logging.info(f"Found {len(articles)} articles on {url}")
+    for article in articles:
+        article_text = article.get_text()
+        logging.info(f"Processing article text: {article_text[:100]}...")
+        found_keywords = analyze_text(article_text, suspicious_keywords)
+        logging.info(f"Found keywords: {found_keywords}")
+        if found_keywords:
+            prediction = classifier.classify(article_text)
+            logging.info(f"Classification result for {url}: {prediction}")
+            threat_data = {
+                'timestamp': datetime.now().isoformat(),
+                'url': url,
+                'keywords': found_keywords,
+                'http_headers': dict(response.headers),
+                'article_content': article.get_text(strip=True),
+                'raw_html': str(article),
+                'is_phishing': prediction
+            }
+            save_threat_to_db(threat_data, fernet)
+            send_email_notification(threat_data)
+
+def main():
+    parser = argparse.ArgumentParser(description='Scrape websites for threats.')
+    parser.add_argument('--password', required=True, help='Password for database encryption.')
+    args = parser.parse_args()
+
+    logging.info("Scraper starting...")
+    try:
+        key = get_encryption_key(args.password)
+        fernet = Fernet(key)
+    except ValueError as e:
+        logging.error(e)
         return
 
-    sent_from = gmail_user
-    to = [recipient_email]
-    subject = 'Potential Cyber Threat Detected'
-    body = f"A potential cyber threat has been detected.\n\nTimestamp: {threat_data['timestamp']}\nURL: {threat_data['url']}\nKeywords: {threat_data['keywords']}\n\nArticle Content:\n{threat_data['article_content']}"
+    init_db(fernet)
+    download_nltk_data()
+    config = load_config()
+    if not config:
+        return
 
-    email_text = f"""From: {sent_from}
-To: {', '.join(to)}
-Subject: {subject}
+    urls = config.get("urls_to_scrape", [])
+    keywords = config.get("suspicious_keywords", [])
 
-{body}
-"""
+    classifier = BertClassifier()
 
-    try:
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.ehlo()
-        server.login(gmail_user, gmail_app_password)
-        server.sendmail(sent_from, to, email_text)
-        server.close()
-
-        print('Email sent successfully!')
-    except Exception as e:
-        print(f'Something went wrong while sending the email: {e}')
-
-def save_threat_to_file(threat_data):
-    with open('threats.json', 'a') as f:
-        json.dump(threat_data, f, indent=4)
-        f.write('\n')
-
-def scrape_website(url):
-    try:
-        download_nltk_data()
-        response = requests.get(url)
-        response.raise_for_status()  # Raise an exception for bad status codes
-
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        suspicious_keywords = ['credit', 'password', 'social', 'login', 'bank', 'phish']
-        stemmer = PorterStemmer()
-        stop_words = set(stopwords.words('english'))
-
-        articles = soup.find_all('article')
-        for article in articles:
-            article_text = article.get_text().lower()
-            words = word_tokenize(article_text)
-            stemmed_words = [stemmer.stem(word) for word in words if word.isalpha() and word not in stop_words]
-
-            found_keywords = []
-            for keyword in suspicious_keywords:
-                if stemmer.stem(keyword) in stemmed_words:
-                    found_keywords.append(keyword)
-            
-            if found_keywords:
-                print(f"Potential threat found in article! Keywords: {found_keywords}")
-                threat_data = {
-                    'timestamp': datetime.now().isoformat(),
-                    'url': url,
-                    'keywords': found_keywords,
-                    'article_content': article.get_text(strip=True)
-                }
-                save_threat_to_file(threat_data)
-                send_email_notification(threat_data)
-            else:
-                print("No threats found in article.")
-
-
-                print(f"Article Content: {article.get_text(strip=True)}")
-
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching the URL: {e}")
+    for url in urls:
+        response = fetch_page(url)
+        process_page(response, keywords, fernet, classifier)
+    
+    logging.info("Scraper finished.")
 
 if __name__ == '__main__':
-    scrape_website('http://127.0.0.1:5000')
+    main()
