@@ -1,16 +1,10 @@
 {
     "urls_to_scrape": [
         "http://127.0.0.1:5000/",
+        "http://127.0.0.1:5000/about",
         "http://127.0.0.1:5000/no-threat",
         "http://127.0.0.1:5000/medium-threat",
         "http://127.0.0.1:5000/high-threat"
     ],
-    "suspicious_keywords": [
-        "credit card",
-        "password",
-        "social security number",
-        "login credentials",
-        "bank account",
-        "phishing"
-    ]
+    "suspicious_keywords": ["malware", "vulnerability", "phishing", "scam"]
 }

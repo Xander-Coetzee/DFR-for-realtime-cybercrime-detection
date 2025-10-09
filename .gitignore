@@ -1,5 +1,12 @@
-.venv/
-__pycache__/
-threats.json
-scraper.log
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+
 threats.db
+scraper.log
+explanations/
+.ruff_cache/
+
