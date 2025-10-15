@@ -6,4 +6,5 @@ transformers
 torch
 pandas
 scikit-learn
-lime
+psutil
+cryptography

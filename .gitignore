@@ -10,3 +10,6 @@ scraper.log
 explanations/
 .ruff_cache/
 
+
+.gemini/
+gha-creds-*.json

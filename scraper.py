@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 
 import nltk
+import psutil
 import requests
 from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet
@@ -19,19 +20,62 @@ from bert_classifier import BertClassifier
 
 DB_FILE = "threats.db"
 
+
+# General logger
+
 logger = logging.getLogger(__name__)
+
 logger.setLevel(logging.INFO)
 
+
+# Metrics logger
+
+metrics_logger = logging.getLogger("metrics")
+
+metrics_logger.setLevel(logging.INFO)
+
+
 # File handler for scraper.log
+
 file_handler = logging.FileHandler("scraper.log")
+
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
 file_handler.setFormatter(formatter)
+
 logger.addHandler(file_handler)
 
+
+# File handler for metrics.log
+
+metrics_file_handler = logging.FileHandler("metrics.log")
+
+metrics_file_handler.setFormatter(formatter)
+
+metrics_logger.addHandler(metrics_file_handler)
+
+
 # Console handler for terminal output
+
 console_handler = logging.StreamHandler()
+
 console_handler.setFormatter(formatter)
+
 logger.addHandler(console_handler)
+
+metrics_logger.addHandler(console_handler)
+
+
+def log_resource_usage(stage="default"):
+    process = psutil.Process(os.getpid())
+
+    memory_info = process.memory_info()
+
+    cpu_percent = psutil.cpu_percent(interval=1)
+
+    metrics_logger.info(
+        f"ResourceUsage - Stage: {stage}, CPU: {cpu_percent}%, Memory: {memory_info.rss / 1024 / 1024:.2f} MB"
+    )
 
 
 def get_encryption_key(password, salt=None):
@@ -60,8 +104,7 @@ def init_db():
                 content_hash TEXT NOT NULL,
                 previous_hash TEXT,
                 is_phishing TEXT, -- Encrypted
-                salt BLOB NOT NULL,
-                explanation_path TEXT
+                salt BLOB NOT NULL
             )
         """)
         cur.execute("SELECT COUNT(*) FROM threats")
@@ -76,7 +119,7 @@ def init_db():
             encrypted_raw_html = b""
             encrypted_is_phishing = b""
             cur.execute(
-                "INSERT INTO threats (timestamp, url, keywords, http_headers, article_content, raw_html, content_hash, previous_hash, is_phishing, salt, explanation_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO threats (timestamp, url, keywords, http_headers, article_content, raw_html, content_hash, previous_hash, is_phishing, salt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     datetime.now().isoformat(),
                     "genesis",
@@ -88,7 +131,6 @@ def init_db():
                     "0" * 64,
                     encrypted_is_phishing,
                     salt,
-                    None,
                 ),
             )
         con.commit()
@@ -145,10 +187,26 @@ def save_threat_to_db(threat_data, fernet):
             json.dumps(threat_data["is_phishing"]).encode()
         )
 
+        # Data Reduction Ratio Calculation
+        original_size = len(raw_html_bytes)
+        stored_size = (
+            len(encrypted_keywords)
+            + len(encrypted_headers)
+            + len(encrypted_content)
+            + len(encrypted_raw_html)
+            + len(encrypted_is_phishing)
+        )
+        reduction_ratio = (
+            (1 - (stored_size / original_size)) * 100 if original_size > 0 else 0
+        )
+        metrics_logger.info(
+            f"DataReduction - URL: {threat_data['url']}, Original Size: {original_size} bytes, Stored Size: {stored_size} bytes, Reduction: {reduction_ratio:.2f}%"
+        )
+
         cur.execute(
             """
-            INSERT INTO threats (timestamp, url, keywords, http_headers, article_content, raw_html, content_hash, previous_hash, is_phishing, salt, explanation_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO threats (timestamp, url, keywords, http_headers, article_content, raw_html, content_hash, previous_hash, is_phishing, salt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 threat_data["timestamp"],
@@ -161,7 +219,6 @@ def save_threat_to_db(threat_data, fernet):
                 last_hash,
                 encrypted_is_phishing,
                 threat_data["salt"],
-                threat_data["explanation_path"],
             ),
         )
         con.commit()
@@ -173,7 +230,12 @@ def save_threat_to_db(threat_data, fernet):
 
 def analyze_text(text, suspicious_keywords):
     text_lower = text.lower()
-    found_keywords = [kw for kw in suspicious_keywords if kw in text_lower]
+    found_keywords = []
+    if isinstance(suspicious_keywords, dict):
+        for category, keywords in suspicious_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    found_keywords.append(keyword)
     return found_keywords
 
 
@@ -193,15 +255,13 @@ def fetch_page(url, max_retries=3, backoff_factor=2):
 
 
 def process_page(response, suspicious_keywords, classifier, password):
+    page_start_time = time.time()
     if not response:
         return
     url = response.url
     soup = BeautifulSoup(response.content, "html.parser")
     articles = soup.find_all("article")
     logger.info(f"Found {len(articles)} articles on {url}")
-
-    explanations_dir = "explanations"
-    os.makedirs(explanations_dir, exist_ok=True)
 
     for article in articles:
         article_text = article.get_text()
@@ -214,20 +274,6 @@ def process_page(response, suspicious_keywords, classifier, password):
             key, salt = get_encryption_key(password)
             fernet = Fernet(key)
 
-            explanation_path = None
-            if prediction and prediction["label"] == "Not Safe":
-                logger.info("Generating LIME explanation (this may take a moment)...")
-                explanation = classifier.explain(article_text)
-                logger.info("LIME explanation generated.")
-                if explanation:
-                    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                    explanation_filename = f"explanation_{timestamp_str}.html"
-                    explanation_path = os.path.join(explanations_dir, explanation_filename)
-                    explanation.save_to_file(explanation_path)
-                    logger.info(f"Explanation saved to {explanation_path}")
-                    explanation_list = explanation.as_list(label=1)
-                    logger.info(f"LIME Explanation (Top features for 'Not Safe'): {explanation_list}")
-
             threat_data = {
                 "timestamp": datetime.now().isoformat(),
                 "url": url,
@@ -237,40 +283,80 @@ def process_page(response, suspicious_keywords, classifier, password):
                 "raw_html": str(article),
                 "is_phishing": prediction,
                 "salt": salt,
-                "explanation_path": explanation_path,
+                "explanation_path": None,
             }
             save_threat_to_db(threat_data, fernet)
             send_email_notification(threat_data)
 
+            page_end_time = time.time()
+            latency = page_end_time - page_start_time
+            metrics_logger.info(f"Latency - URL: {url}, Latency: {latency:.2f}s")
+            log_resource_usage(f"process_page_{url}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Scrape websites for threats.")
+
     parser.add_argument(
         "--password", required=True, help="Password for database encryption."
     )
+
     args = parser.parse_args()
 
     logger.info("Scraper starting...")
+
+    log_resource_usage("main_start")
+
+    start_time = time.time()
+
     try:
         get_encryption_key(args.password)
+
     except ValueError as e:
         logger.error(e)
+
         return
 
     init_db()
+
     download_nltk_data()
+
     config = load_config()
+
     if not config:
         return
 
     urls = config.get("urls_to_scrape", [])
-    keywords = config.get("suspicious_keywords", [])
+
+    keywords = config.get("phishing_keywords", {})
+
+    total_urls = len(urls)
+
+    successful_scrapes = 0
 
     classifier = BertClassifier()
 
     for url in urls:
         response = fetch_page(url)
-        process_page(response, keywords, classifier, args.password)
+
+        if response:
+            successful_scrapes += 1
+
+            process_page(response, keywords, classifier, args.password)
+
+    end_time = time.time()
+
+    total_time = end_time - start_time
+
+    throughput = total_urls / total_time if total_time > 0 else 0
+
+    success_rate = (successful_scrapes / total_urls) * 100 if total_urls > 0 else 0
+
+    metrics_logger.info(
+        f"OverallStats - Total Time: {total_time:.2f}s, Throughput: {throughput:.2f} pages/s, Success Rate: {success_rate:.2f}%"
+    )
+
+    log_resource_usage("main_end")
 
     logger.info("Scraper finished.")
 

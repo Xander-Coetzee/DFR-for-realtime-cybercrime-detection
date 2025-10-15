@@ -6,5 +6,27 @@
         "http://127.0.0.1:5000/medium-threat",
         "http://127.0.0.1:5000/high-threat"
     ],
-    "suspicious_keywords": ["malware", "vulnerability", "phishing", "scam"]
+    "phishing_keywords": {
+        "urgency": [
+            "urgent", "immediate", "action required", "limited time", "expires", "24 hours"
+        ],
+        "account_issues": [
+            "account suspended", "unusual activity", "security alert", "verification required", "confirm your identity", "account locked"
+        ],
+        "financial": [
+            "invoice", "payment", "refund", "credit card", "bank account", "overdue"
+        ],
+        "login_credentials": [
+            "password", "username", "login", "sign in", "reset your password", "credentials"
+        ],
+        "generic_greetings": [
+            "dear customer", "dear user", "valued customer"
+        ],
+        "prizes_rewards": [
+            "congratulations", "winner", "prize", "lottery", "claim your reward", "free gift"
+        ],
+        "suspicious_links": [
+            "click here", "verify your account", "update your details", "unsubscribe"
+        ]
+    }
 }
