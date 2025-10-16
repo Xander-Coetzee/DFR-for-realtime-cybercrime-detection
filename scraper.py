@@ -275,46 +275,49 @@ def process_page(response, suspicious_keywords, classifier, password, keyword_st
         return
     url = response.url
     soup = BeautifulSoup(response.content, "html.parser")
-    articles = soup.find_all("article")
-    logger.info(f"Found {len(articles)} articles on {url}")
 
-    for article in articles:
-        article_text = article.get_text()
-        logger.info(f"Processing article text: {article_text[:100]}...")
-        found_keywords = analyze_text(article_text, suspicious_keywords)
-        logger.info(f"Found keywords: {found_keywords}")
-        if found_keywords:
-            prediction = classifier.classify(article_text)
-            logger.info(f"Classification result for {url}: {prediction}")
+    # Get text from the entire body
+    if soup.body:
+        page_text = soup.body.get_text()
+    else:
+        page_text = soup.get_text()
 
-            # Update keyword_stats
-            for keyword in found_keywords:
-                if keyword in keyword_stats:
-                    keyword_stats[keyword]["found_count"] += 1
-                    if prediction and prediction["label"] == "Not Safe":
-                        keyword_stats[keyword]["notsafe_count"] += 1
+    logger.info(f"Processing page text: {page_text[:200]}...")
+    found_keywords = analyze_text(page_text, suspicious_keywords)
+    logger.info(f"Found keywords: {found_keywords}")
 
-            key, salt = get_encryption_key(password)
-            fernet = Fernet(key)
+    if found_keywords:
+        prediction = classifier.classify(page_text)
+        logger.info(f"Classification result for {url}: {prediction}")
 
-            threat_data = {
-                "timestamp": datetime.now().isoformat(),
-                "url": url,
-                "keywords": found_keywords,
-                "http_headers": dict(response.headers),
-                "article_content": article.get_text(strip=True),
-                "raw_html": str(article),
-                "is_phishing": prediction,
-                "salt": salt,
-                "explanation_path": None,
-            }
-            save_threat_to_db(threat_data, fernet)
-            send_email_notification(threat_data)
+        # Update keyword_stats
+        for keyword in found_keywords:
+            if keyword in keyword_stats:
+                keyword_stats[keyword]["found_count"] += 1
+                if prediction and prediction["label"] == "Not Safe":
+                    keyword_stats[keyword]["notsafe_count"] += 1
 
-            page_end_time = time.time()
-            latency = page_end_time - page_start_time
-            metrics_logger.info(f"Latency - URL: {url}, Latency: {latency:.2f}s")
-            log_resource_usage(f"process_page_{url}")
+        key, salt = get_encryption_key(password)
+        fernet = Fernet(key)
+
+        threat_data = {
+            "timestamp": datetime.now().isoformat(),
+            "url": url,
+            "keywords": found_keywords,
+            "http_headers": dict(response.headers),
+            "article_content": page_text,  # Storing full body text
+            "raw_html": str(soup),  # Storing full html
+            "is_phishing": prediction,
+            "salt": salt,
+            "explanation_path": None,
+        }
+        save_threat_to_db(threat_data, fernet)
+        send_email_notification(threat_data)
+
+        page_end_time = time.time()
+        latency = page_end_time - page_start_time
+        metrics_logger.info(f"Latency - URL: {url}, Latency: {latency:.2f}s")
+        log_resource_usage(f"process_page_{url}")
 
 
 def main():

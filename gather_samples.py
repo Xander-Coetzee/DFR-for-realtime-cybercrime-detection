@@ -8,7 +8,7 @@ import requests
 
 # --- Configuration ---
 # PhishTank CSV can be downloaded from: https://data.phishtank.com/data/online-valid.csv.gz
-PHISHTANK_CSV = "verified_online.csv" 
+PHISHTANK_CSV = "verified_online.csv"
 
 # Tranco top sites list can be downloaded from: https://tranco-list.eu/
 TRANCO_CSV = "tranco_7NZVX.csv"  # <-- IMPORTANT: Change to your Tranco file name
@@ -50,7 +50,9 @@ def gather_positive_samples():
     print("\n--- Gathering Positive Samples (Phishing) ---")
     if not os.path.exists(PHISHTANK_CSV):
         print(f"ERROR: PhishTank file '{PHISHTANK_CSV}' not found.")
-        print("Please download it from https://data.phishtank.com/data/online-valid.csv.gz")
+        print(
+            "Please download it from https://data.phishtank.com/data/online-valid.csv.gz"
+        )
         return
     count = 0
     with open(PHISHTANK_CSV, "r", encoding="utf-8") as f:
@@ -85,7 +87,7 @@ def gather_negative_samples():
             urls_to_try = [f"https://{domain}", f"http://{domain}"]
             filename = hashlib.md5(domain.encode()).hexdigest() + ".txt"
             save_path = os.path.join(NEGATIVE_DIR, filename)
-            
+
             success = False
             for url in urls_to_try:
                 print(f"Processing ({count + 1}/{NUM_NEGATIVE_SAMPLES}): {url}")
@@ -93,7 +95,7 @@ def gather_negative_samples():
                     count += 1
                     success = True
                     break  # Move to the next domain if download succeeds
-            
+
             if success:
                 time.sleep(0.5)
 
