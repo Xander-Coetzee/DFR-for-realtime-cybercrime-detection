@@ -66,6 +66,21 @@ logger.addHandler(console_handler)
 metrics_logger.addHandler(console_handler)
 
 
+# Keyword effectiveness logger
+
+keyword_logger = logging.getLogger("keyword_effectiveness")
+
+keyword_logger.setLevel(logging.INFO)
+
+keyword_file_handler = logging.FileHandler("keyword_effectiveness.log")
+
+keyword_file_handler.setFormatter(formatter)
+
+keyword_logger.addHandler(keyword_file_handler)
+
+keyword_logger.addHandler(console_handler)
+
+
 def log_resource_usage(stage="default"):
     process = psutil.Process(os.getpid())
 
@@ -254,7 +269,7 @@ def fetch_page(url, max_retries=3, backoff_factor=2):
     return None
 
 
-def process_page(response, suspicious_keywords, classifier, password):
+def process_page(response, suspicious_keywords, classifier, password, keyword_stats):
     page_start_time = time.time()
     if not response:
         return
@@ -271,6 +286,14 @@ def process_page(response, suspicious_keywords, classifier, password):
         if found_keywords:
             prediction = classifier.classify(article_text)
             logger.info(f"Classification result for {url}: {prediction}")
+
+            # Update keyword_stats
+            for keyword in found_keywords:
+                if keyword in keyword_stats:
+                    keyword_stats[keyword]["found_count"] += 1
+                    if prediction and prediction["label"] == "Not Safe":
+                        keyword_stats[keyword]["notsafe_count"] += 1
+
             key, salt = get_encryption_key(password)
             fernet = Fernet(key)
 
@@ -329,6 +352,8 @@ def main():
     urls = config.get("urls_to_scrape", [])
 
     keywords = config.get("phishing_keywords", {})
+    all_keywords = [kw for sublist in keywords.values() for kw in sublist]
+    keyword_stats = {kw: {"found_count": 0, "notsafe_count": 0} for kw in all_keywords}
 
     total_urls = len(urls)
 
@@ -342,7 +367,7 @@ def main():
         if response:
             successful_scrapes += 1
 
-            process_page(response, keywords, classifier, args.password)
+            process_page(response, keywords, classifier, args.password, keyword_stats)
 
     end_time = time.time()
 
@@ -355,6 +380,30 @@ def main():
     metrics_logger.info(
         f"OverallStats - Total Time: {total_time:.2f}s, Throughput: {throughput:.2f} pages/s, Success Rate: {success_rate:.2f}%"
     )
+
+    # Keyword Effectiveness Analysis
+    keyword_logger.info("Keyword Effectiveness Analysis:")
+    effectiveness = {}
+    for keyword, stats in keyword_stats.items():
+        if stats["found_count"] > 0:
+            effectiveness[keyword] = (
+                stats["notsafe_count"] / stats["found_count"]
+            ) * 100
+        else:
+            effectiveness[keyword] = 0
+
+    sorted_effectiveness = sorted(
+        effectiveness.items(), key=lambda item: item[1], reverse=True
+    )
+
+    for keyword, eff in sorted_effectiveness:
+        stats = keyword_stats[keyword]
+        keyword_logger.info(
+            f'- Keyword: "{keyword}"\n'
+            f"  - Effectiveness: {eff:.2f}%\n"
+            f"  - Found Count: {stats['found_count']}\n"
+            f"  - 'Not Safe' Count: {stats['notsafe_count']}"
+        )
 
     log_resource_usage("main_end")
 

@@ -13,3 +13,6 @@ explanations/
 
 .gemini/
 gha-creds-*.json
+benchmark_data/
+keyword_effectiveness.log
+*.csv
